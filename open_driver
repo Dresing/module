@@ -1,0 +1,8 @@
+#!/bin/bash
+# Init script
+
+
+
+cd /dev
+cat dm510-0
+cd /mnt/tmp/dm510/module/

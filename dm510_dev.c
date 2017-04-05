@@ -51,6 +51,7 @@ static ssize_t dm510_write( struct file*, const char*, size_t, loff_t* );
 long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 int dm510_init_device(struct device*, int index);
 int dm510_init_buffer(struct buffer*);
+static int spacefree(struct device *dev);
 
 #define DEVICE_NAME "dm510_dev" /* Dev name as it appears in /proc/devices */
 #define MAJOR_NUMBER 254
@@ -257,6 +258,12 @@ static ssize_t dm510_write( struct file *filp,
 
   struct device *dev = filp->private_data;
 
+  if (down_interruptible(&dev->sem)){
+      return -ERESTARTSYS;
+  }
+
+  /* ok, space is there, accept something */
+	count = min(count, (size_t)spacefree(dev));
 
   //printk(KERN_INFO "DM510: I wrote stuff.\n");
 	return 5; //return number of bytes written
@@ -333,7 +340,11 @@ int dm510_init_buffer(struct buffer *buffer){
 */
   return 0;
 }
-
+static int spacefree(struct device *dev){
+  if (dev->rp == dev->wp)
+		return dev->buffersize - 1;
+	return ((dev->rp + dev->buffersize - dev->wp) % dev->buffersize) - 1;
+}
 
 module_init( dm510_init_module );
 module_exit( dm510_cleanup_module );
