@@ -21,7 +21,7 @@
 /* #include <asm/system.h> */
 #include <asm/switch_to.h>
 #ifndef DEFAULT_BUFFER
-  #define DEFAULT_BUFFER 4000
+  #define DEFAULT_BUFFER 400000
 #endif
 #define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1);
 
@@ -35,8 +35,8 @@ struct buffer {
 
 struct device {
     int index;
-    struct readBuffer *buffer;
-    struct writeBuffer *buffer;
+    struct buffer *readBuffer;
+    struct buffer *writeBuffer;
     struct fasync_struct *async_queue; /* asynchronous readers */
     struct semaphore sem;              /* mutual exclusion semaphore */
     struct cdev cdev;                  /* Char device structure */
@@ -224,13 +224,21 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
     return -ERESTARTSYS;
   }
 
-  dev->buffer = zeroBuffer;
+  //Indentify the current device read/write buffer depending on its index.
+  if(dev->index == 0){
+    dev->readBuffer = zeroBuffer;
+    dev->writeBuffer = firstBuffer;
+  }
+  else{
+    dev->readBuffer = firstBuffer;
+    dev->writeBuffer = zeroBuffer;
+  }
 
   //Increment number of readers/writers accordingly to mode and release the lock
 	if (filp->f_mode & FMODE_READ)
-		dev->buffer->nreaders++;
+		dev->readBuffer->nreaders++;
 	if (filp->f_mode & FMODE_WRITE)
-		dev->buffer->nwriters++;
+		dev->writeBuffer->nwriters++;
 	up(&dev->sem);
 
   //Debug message
@@ -251,10 +259,10 @@ static int dm510_release( struct inode *inode, struct file *filp ) {
 	//Require the lock and decrement the counter of reader/write depeding on mode.
 	down(&dev->sem);
 	if (filp->f_mode & FMODE_READ){
-    dev->buffer->nreaders--;
+    dev->readBuffer->nreaders--;
   }
 	if (filp->f_mode & FMODE_WRITE){
-    dev->buffer->nwriters--;
+    dev->writeBuffer->nwriters--;
   }
 
   //Release the lock
@@ -281,33 +289,35 @@ static ssize_t dm510_read( struct file *filp,
       return -ERESTARTSYS;
   }
 
-  while(dev->buffer->rp == dev->buffer->wp){
+  while(dev->readBuffer->rp == dev->readBuffer->wp){
     up (&dev->sem);
-    if (wait_event_interruptible(dev->buffer->outq, (dev->buffer->rp != dev->buffer->wp))){
+    printk(KERN_INFO "DM510: Going to sleep. \n");
+    if (wait_event_interruptible(dev->readBuffer->outq, (dev->readBuffer->rp != dev->readBuffer->wp))){
       return -ERESTARTSYS;
     }
 		if (down_interruptible(&dev->sem)){
       return -ERESTARTSYS;
     }
+    printk(KERN_INFO "DM510: Woke up. \n");
   }
-  if (dev->buffer->wp > dev->buffer->rp){
-    count = min(count, (size_t)(dev->buffer->wp - dev->buffer->rp));
+  if (dev->readBuffer->wp > dev->readBuffer->rp){
+    count = min(count, (size_t)(dev->readBuffer->wp - dev->readBuffer->rp));
   }
 	else{
-    count = min(count, (size_t)(dev->buffer->end - dev->buffer->rp));
+    count = min(count, (size_t)(dev->readBuffer->end - dev->readBuffer->rp));
   }
 
-	if (copy_to_user(buf, dev->buffer->rp, count)) {
+	if (copy_to_user(buf, dev->readBuffer->rp, count)) {
 		up (&dev->sem);
 		return -EFAULT;
 	}
-	dev->buffer->rp += count;
-	if (dev->buffer->rp == dev->buffer->end)
-		dev->buffer->rp = dev->buffer->start; /* wrapped */
+	dev->readBuffer->rp += count;
+	if (dev->readBuffer->rp == dev->readBuffer->end)
+		dev->readBuffer->rp = dev->readBuffer->start; /* wrapped */
 	up (&dev->sem);
 
 	/* finally, awake any writers and return */
-	wake_up_interruptible(&dev->buffer->inq);
+	wake_up_interruptible(&dev->readBuffer->inq);
 
 	return count; //return number of bytes read
 }
@@ -327,7 +337,7 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
   if(spacefree(dev) == 0){
     up (&dev->sem);
 
-    if(wait_event_interruptible(dev->buffer->inq, false)){
+    if(wait_event_interruptible(dev->writeBuffer->inq, false)){
       return -ERESTARTSYS;
     }
 
@@ -336,17 +346,17 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
 
   /**
   *  If write pointer is in front of the read pointer
-  *  the available writespace is untill end of buffer
+  *  the available writespace is untill end of writeBuffer
   */
-  if(dev->buffer->wp >= dev->buffer->rp){
-	   count = min(count, (size_t)(dev->buffer->end - dev->buffer->wp));
+  if(dev->writeBuffer->wp >= dev->writeBuffer->rp){
+	   count = min(count, (size_t)(dev->writeBuffer->end - dev->writeBuffer->wp));
   }
   /**
   * The writepointer has wrapped and can continue up to
   * readpointer.
   */
   else{
-    count = min(count, (size_t)(dev->buffer->rp - dev->buffer->wp -1));
+    count = min(count, (size_t)(dev->writeBuffer->rp - dev->writeBuffer->wp -1));
   }
 
   /**
@@ -358,18 +368,20 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
     return count;
   }
 
-  if (copy_from_user(dev->buffer->wp, buf, count)) {
+  if (copy_from_user(dev->writeBuffer->wp, buf, count)) {
     up (&dev->sem);
     return -EFAULT;
   }
 
-  dev->buffer->wp += count;
+  dev->writeBuffer->wp += count;
 
-  if (dev->buffer->wp == dev->buffer->end){
-    dev->buffer->wp = dev->buffer->start;
+  if (dev->writeBuffer->wp == dev->writeBuffer->end){
+    dev->writeBuffer->wp = dev->writeBuffer->start;
   }
 
   up(&dev->sem);
+
+  wake_up_interruptible(&dev->writeBuffer->outq);
 
 	return count; //return number of bytes written
 }
@@ -445,11 +457,11 @@ int dm510_init_buffer(struct buffer *buffer){
 static int spacefree(struct device *dev){
 
   //Pointers allign, thus, the entire buffer, minus the current position, is free.
-  if (dev->buffer->rp == dev->buffer->wp)
-		return dev->buffer->buffersize - 1;
+  if (dev->writeBuffer->rp == dev->writeBuffer->wp)
+		return dev->writeBuffer->buffersize - 1;
 
   //Calculate the space avaiable including wrap.
-	return ((dev->buffer->rp + dev->buffer->buffersize - dev->buffer->wp) % dev->buffer->buffersize) - 1;
+	return ((dev->writeBuffer->rp + dev->writeBuffer->buffersize - dev->writeBuffer->wp) % dev->writeBuffer->buffersize) - 1;
 }
 
 module_init( dm510_init_module );

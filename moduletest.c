@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#define ITS 10000
+#define ITS 10
 
 void read_all(int fd, void *buf, int count) {
     while (count > 0) {
@@ -57,7 +57,7 @@ int main(int argc, char *argv[])
 
     if (pid == 0) {
         fd = open("/dev/dm510-0", O_RDWR);
-	perror("w open");	
+	perror("w open");
         for (i=0; i<ITS; i++) {
             val++;
             sum += val;
