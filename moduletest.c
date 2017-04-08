@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#define ITS 10
+#define ITS 10000
 
 void read_all(int fd, void *buf, int count) {
     while (count > 0) {
