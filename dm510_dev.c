@@ -17,10 +17,11 @@
 #include <linux/wait.h>
 #include <asm/uaccess.h>
 #include <linux/semaphore.h>
+#include <linux/sched.h>
 /* #include <asm/system.h> */
 #include <asm/switch_to.h>
 #ifndef DEFAULT_BUFFER
-  #define DEFAULT_BUFFER 40
+  #define DEFAULT_BUFFER 4000
 #endif
 #define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1);
 
@@ -34,7 +35,8 @@ struct buffer {
 
 struct device {
     int index;
-    struct buffer *buffer;
+    struct readBuffer *buffer;
+    struct writeBuffer *buffer;
     struct fasync_struct *async_queue; /* asynchronous readers */
     struct semaphore sem;              /* mutual exclusion semaphore */
     struct cdev cdev;                  /* Char device structure */
@@ -72,6 +74,7 @@ static struct file_operations dm510_fops = {
 };
 
 static struct buffer *zeroBuffer;
+static struct buffer *firstBuffer;
 
 
 dev_t deviceNums = MKDEV(MAJOR_NUMBER, MIN_MINOR_NUMBER);
@@ -100,9 +103,15 @@ int dm510_init_module( void ) {
 
   //Alocate buffers
   zeroBuffer = kmalloc(sizeof(struct buffer), GFP_KERNEL);
+  firstBuffer = kmalloc(sizeof(struct buffer), GFP_KERNEL);
 
   //The buffers were not allocated, release lock and give a no memory error.
   if (!zeroBuffer) {
+    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
+    printk(KERN_INFO "DM510: Register error. \n");
+    return -ENOMEM;
+  }
+  if (!firstBuffer) {
     unregister_chrdev_region(deviceNums, DEVICE_COUNT);
     printk(KERN_INFO "DM510: Register error. \n");
     return -ENOMEM;
@@ -115,18 +124,32 @@ int dm510_init_module( void ) {
     return -ENOMEM;
   }
 
+  firstBuffer->start = kmalloc(DEFAULT_BUFFER, GFP_KERNEL);
+  if (!firstBuffer->start) {
+    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
+    printk(KERN_INFO "DM510: Register error. \n");
+    return -ENOMEM;
+  }
+
+
   //Set buffersize in buffer struct.
   zeroBuffer->buffersize = DEFAULT_BUFFER;
+  firstBuffer->buffersize = DEFAULT_BUFFER;
 
   //End of the buffer is the start address plus the size.
   zeroBuffer->end = zeroBuffer->start + zeroBuffer->buffersize;
+  firstBuffer->end = firstBuffer->start + firstBuffer->buffersize;
 
   //Read and write pointers should start at the beginning of file (device)
   zeroBuffer->rp = zeroBuffer->wp = zeroBuffer->start;
+  firstBuffer->rp = firstBuffer->wp = firstBuffer->start;
 
   //Init queues
 	init_waitqueue_head(&(zeroBuffer->inq));
 	init_waitqueue_head(&(zeroBuffer->outq));
+  init_waitqueue_head(&(firstBuffer->inq));
+	init_waitqueue_head(&(firstBuffer->outq));
+
 
   //Iterating variable necesary as of c90 standard
 	int i;
@@ -170,6 +193,8 @@ void dm510_cleanup_module( void ) {
 	kfree(devices);
   kfree(zeroBuffer->start);
   kfree(zeroBuffer);
+  kfree(firstBuffer->start);
+  kfree(firstBuffer);
   unregister_chrdev_region(deviceNums, DEVICE_COUNT);
 
   //Ensure that the device pointer is indeed null.
@@ -256,15 +281,33 @@ static ssize_t dm510_read( struct file *filp,
       return -ERESTARTSYS;
   }
 
-  count = min(count, (size_t)(dev->buffer->wp - dev->buffer->rp));
-
-  if (copy_to_user(buf, dev->buffer->rp, count)) {
+  while(dev->buffer->rp == dev->buffer->wp){
     up (&dev->sem);
-    return -EFAULT;
+    if (wait_event_interruptible(dev->buffer->outq, (dev->buffer->rp != dev->buffer->wp))){
+      return -ERESTARTSYS;
+    }
+		if (down_interruptible(&dev->sem)){
+      return -ERESTARTSYS;
+    }
   }
-  dev->buffer->rp += count;
+  if (dev->buffer->wp > dev->buffer->rp){
+    count = min(count, (size_t)(dev->buffer->wp - dev->buffer->rp));
+  }
+	else{
+    count = min(count, (size_t)(dev->buffer->end - dev->buffer->rp));
+  }
 
-  up (&dev->sem);
+	if (copy_to_user(buf, dev->buffer->rp, count)) {
+		up (&dev->sem);
+		return -EFAULT;
+	}
+	dev->buffer->rp += count;
+	if (dev->buffer->rp == dev->buffer->end)
+		dev->buffer->rp = dev->buffer->start; /* wrapped */
+	up (&dev->sem);
+
+	/* finally, awake any writers and return */
+	wake_up_interruptible(&dev->buffer->inq);
 
 	return count; //return number of bytes read
 }
@@ -281,10 +324,35 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
       return -ERESTARTSYS;
   }
 
-  //Get the smaller of the bytes desired to write and what's available.
-	count = min(count, (size_t)(dev->buffer->end - dev->buffer->wp));
+  if(spacefree(dev) == 0){
+    up (&dev->sem);
 
-  if(!count){
+    if(wait_event_interruptible(dev->buffer->inq, false)){
+      return -ERESTARTSYS;
+    }
+
+    return 0;
+  }
+
+  /**
+  *  If write pointer is in front of the read pointer
+  *  the available writespace is untill end of buffer
+  */
+  if(dev->buffer->wp >= dev->buffer->rp){
+	   count = min(count, (size_t)(dev->buffer->end - dev->buffer->wp));
+  }
+  /**
+  * The writepointer has wrapped and can continue up to
+  * readpointer.
+  */
+  else{
+    count = min(count, (size_t)(dev->buffer->rp - dev->buffer->wp -1));
+  }
+
+  /**
+  * There is currently nothing to write
+  */
+  if(spacefree(dev) == 0){
     printk(KERN_INFO "DM510: Couldn't write anything. \n");
     up (&dev->sem);
     return count;
@@ -296,6 +364,10 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
   }
 
   dev->buffer->wp += count;
+
+  if (dev->buffer->wp == dev->buffer->end){
+    dev->buffer->wp = dev->buffer->start;
+  }
 
   up(&dev->sem);
 
@@ -371,10 +443,13 @@ int dm510_init_buffer(struct buffer *buffer){
   return 0;
 }
 static int spacefree(struct device *dev){
-/*  if (dev->rp == dev->wp)
-		return dev->buffersize - 1;
-	return ((dev->rp + dev->buffersize - dev->wp) % dev->buffersize) - 1;*/
-  return 0;
+
+  //Pointers allign, thus, the entire buffer, minus the current position, is free.
+  if (dev->buffer->rp == dev->buffer->wp)
+		return dev->buffer->buffersize - 1;
+
+  //Calculate the space avaiable including wrap.
+	return ((dev->buffer->rp + dev->buffer->buffersize - dev->buffer->wp) % dev->buffer->buffersize) - 1;
 }
 
 module_init( dm510_init_module );
