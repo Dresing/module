@@ -21,7 +21,7 @@
 /* #include <asm/system.h> */
 #include <asm/switch_to.h>
 #ifndef DEFAULT_BUFFER
-  #define DEFAULT_BUFFER 4060
+  #define DEFAULT_BUFFER 35000
 #endif
 #define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1);
 
@@ -285,14 +285,20 @@ static ssize_t dm510_read( struct file *filp,
 
   struct device *dev = filp->private_data;
 
+  if (down_interruptible(&dev->sem)){
+    return -ERESTARTSYS;
+  }
 
   while(dev->readBuffer->rp == dev->readBuffer->wp){
-    printk(KERN_INFO "DM510: Going to sleep. \n");
-    if (wait_event_interruptible(dev->readBuffer->outq, (dev->readBuffer->rp != dev->readBuffer->wp))){
+    up(&dev->sem);
+
+    if(wait_event_interruptible(dev->readBuffer->outq, (dev->readBuffer->rp == dev->readBuffer->wp))){
       return -ERESTARTSYS;
     }
 
-    printk(KERN_INFO "DM510: Woke up. \n");
+    if (down_interruptible(&dev->sem)){
+        return -ERESTARTSYS;
+    }
   }
   if (dev->readBuffer->wp > dev->readBuffer->rp){
     count = min(count, (size_t)(dev->readBuffer->wp - dev->readBuffer->rp));
@@ -302,14 +308,17 @@ static ssize_t dm510_read( struct file *filp,
   }
 
 	if (copy_to_user(buf, dev->readBuffer->rp, count)) {
+    up(&dev->sem);
 		return -EFAULT;
 	}
 	dev->readBuffer->rp += count;
-	if (dev->readBuffer->rp == dev->readBuffer->end)
-		dev->readBuffer->rp = dev->readBuffer->start; /* wrapped */
+	if (dev->readBuffer->rp == dev->readBuffer->end){
+    dev->readBuffer->rp = dev->readBuffer->start; /* wrapped */
+  }
 
-	/* finally, awake any writers and return */
-	wake_up_interruptible(&dev->readBuffer->inq);
+  up(&dev->sem);
+
+  wake_up_interruptible(&dev->readBuffer->inq);
 
 	return count; //return number of bytes read
 }
@@ -319,22 +328,29 @@ static ssize_t dm510_read( struct file *filp,
 static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, loff_t *f_pos ) {
 
 	/* write code belongs here */
-
   struct device *dev = filp->private_data;
 
   if (down_interruptible(&dev->sem)){
-      return -ERESTARTSYS;
+    return -ERESTARTSYS;
   }
 
-  if(spacefree(dev) == 0){
-    up (&dev->sem);
-    if(wait_event_interruptible(dev->writeBuffer->inq, false)){
+
+  while(spacefree(dev) == 0){
+    up(&dev->sem);
+
+    if(wait_event_interruptible(dev->writeBuffer->inq, (spacefree(dev) != 0))){
       return -ERESTARTSYS;
     }
 
-    printk(KERN_INFO "Wrote nothing.\n");
+    if (down_interruptible(&dev->sem)){
+      return -ERESTARTSYS;
+    }
 
-    return 0;
+  }
+
+
+  if(dev->writeBuffer->wp == dev->writeBuffer->end){
+    dev->writeBuffer->wp = dev->writeBuffer->start;
   }
 
   /**
@@ -361,26 +377,8 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
 
   dev->writeBuffer->wp += count;
 
-  if (dev->writeBuffer->wp == dev->writeBuffer->end){
-
-    while(dev->writeBuffer->start == dev->writeBuffer->rp){
-      up(&dev->sem);
-      printk(KERN_INFO "Writer going to sleep.\n");
-      wake_up_interruptible(&dev->writeBuffer->outq);
-      if(wait_event_interruptible_timeout(dev->writeBuffer->inq, (dev->writeBuffer->start != dev->writeBuffer->rp), 500)){
-        return -ERESTARTSYS;
-      }
-
-      if (down_interruptible(&dev->sem)){
-          return -ERESTARTSYS;
-      }
-
-    }
-    printk(KERN_INFO "DM510: Reached end, wrapping.\n");
-    dev->writeBuffer->wp = dev->writeBuffer->start;
-  }
-
   up(&dev->sem);
+
   wake_up_interruptible(&dev->writeBuffer->outq);
 
 	return count; //return number of bytes written
@@ -436,8 +434,9 @@ int dm510_init_device(struct device *device, int index){
 static int spacefree(struct device *dev){
 
   //Pointers allign, thus, the entire buffer, minus the current position, is free.
-  if (dev->writeBuffer->rp == dev->writeBuffer->wp)
-		return dev->writeBuffer->buffersize - 1;
+  if (dev->writeBuffer->rp == dev->writeBuffer->wp){
+    return dev->writeBuffer->buffersize - 1;
+  }
 
   //Calculate the space avaiable including wrap.
 	return ((dev->writeBuffer->rp + dev->writeBuffer->buffersize - dev->writeBuffer->wp) % dev->writeBuffer->buffersize) - 1;
