@@ -21,7 +21,7 @@
 /* #include <asm/system.h> */
 #include <asm/switch_to.h>
 #ifndef DEFAULT_BUFFER
-  #define DEFAULT_BUFFER 35000
+  #define DEFAULT_BUFFER 1
 #endif
 #define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1);
 
@@ -31,6 +31,7 @@ struct buffer {
     int buffersize;                    /* used in pointer arithmetic */
     char *rp, *wp;                     /* where to read, where to write */
     int nreaders, nwriters;
+    struct semaphore sem;
 };
 
 struct device {
@@ -149,6 +150,9 @@ int dm510_init_module( void ) {
 	init_waitqueue_head(&(zeroBuffer->outq));
   init_waitqueue_head(&(firstBuffer->inq));
 	init_waitqueue_head(&(firstBuffer->outq));
+
+  init_MUTEX(&zeroBuffer->sem);
+  init_MUTEX(&firstBuffer->sem);
 
 
   //Iterating variable necesary as of c90 standard
@@ -285,38 +289,33 @@ static ssize_t dm510_read( struct file *filp,
 
   struct device *dev = filp->private_data;
 
-  if (down_interruptible(&dev->sem)){
+  if (down_interruptible(&dev->readBuffer->sem)){
     return -ERESTARTSYS;
   }
 
-  while(dev->readBuffer->rp == dev->readBuffer->wp){
-    up(&dev->sem);
+  if(dev->readBuffer->rp == dev->readBuffer->wp){
+    up(&dev->readBuffer->sem);
 
-    if(wait_event_interruptible(dev->readBuffer->outq, (dev->readBuffer->rp == dev->readBuffer->wp))){
+    wake_up_interruptible(&dev->readBuffer->inq);
+
+    if(wait_event_interruptible(dev->readBuffer->outq, (dev->readBuffer->rp != dev->readBuffer->wp))){
       return -ERESTARTSYS;
     }
 
-    if (down_interruptible(&dev->sem)){
-        return -ERESTARTSYS;
-    }
+    return 0;
   }
-  if (dev->readBuffer->wp > dev->readBuffer->rp){
-    count = min(count, (size_t)(dev->readBuffer->wp - dev->readBuffer->rp));
-  }
-	else{
-    count = min(count, (size_t)(dev->readBuffer->end - dev->readBuffer->rp));
-  }
+
+  count = min(count, (size_t)(dev->readBuffer->wp - dev->readBuffer->rp));
+
 
 	if (copy_to_user(buf, dev->readBuffer->rp, count)) {
-    up(&dev->sem);
+    up(&dev->readBuffer->sem);
 		return -EFAULT;
 	}
-	dev->readBuffer->rp += count;
-	if (dev->readBuffer->rp == dev->readBuffer->end){
-    dev->readBuffer->rp = dev->readBuffer->start; /* wrapped */
-  }
 
-  up(&dev->sem);
+	dev->readBuffer->rp += count;
+
+  up(&dev->readBuffer->sem);
 
   wake_up_interruptible(&dev->readBuffer->inq);
 
@@ -330,58 +329,38 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
 	/* write code belongs here */
   struct device *dev = filp->private_data;
 
-  if (down_interruptible(&dev->sem)){
+  if (down_interruptible(&dev->writeBuffer->sem)){
     return -ERESTARTSYS;
   }
 
-
-  while(spacefree(dev) == 0){
-    up(&dev->sem);
-
-    if(wait_event_interruptible(dev->writeBuffer->inq, (spacefree(dev) != 0))){
-      return -ERESTARTSYS;
-    }
-
-    if (down_interruptible(&dev->sem)){
-      return -ERESTARTSYS;
-    }
-
-  }
-
-
   if(dev->writeBuffer->wp == dev->writeBuffer->end){
-    dev->writeBuffer->wp = dev->writeBuffer->start;
+    if(dev->writeBuffer->rp != dev->writeBuffer->end){
+      up(&dev->writeBuffer->sem);
+      if(wait_event_interruptible(dev->writeBuffer->inq, (dev->writeBuffer->rp == dev->writeBuffer->end))){
+        return -ERESTARTSYS;
+      }
+      return 0;
+    }
+    else{
+      dev->writeBuffer->wp = dev->writeBuffer->start;
+      dev->writeBuffer->rp = dev->writeBuffer->start;
+    }
   }
 
-  /**
-  *  If write pointer is in front of the read pointer
-  *  the available writespace is untill end of writeBuffer
-  */
-  if(dev->writeBuffer->wp >= dev->writeBuffer->rp){
-	   count = min(count, (size_t)(dev->writeBuffer->end - dev->writeBuffer->wp));
-  }
-  /**
-  * The writepointer has wrapped and can continue up to
-  * readpointer.
-  */
-  else{
-    count = min(count, (size_t)(dev->writeBuffer->rp - dev->writeBuffer->wp -1));
-  }
-
-
+	count = min(count, (size_t)(dev->writeBuffer->end - dev->writeBuffer->wp));
 
   if (copy_from_user(dev->writeBuffer->wp, buf, count)) {
-    up (&dev->sem);
+    up (&dev->writeBuffer->sem);
     return -EFAULT;
   }
 
   dev->writeBuffer->wp += count;
 
-  up(&dev->sem);
+  up(&dev->writeBuffer->sem);
 
   wake_up_interruptible(&dev->writeBuffer->outq);
 
-	return count; //return number of bytes written
+	return count;
 }
 
 /* called by system call icotl */
