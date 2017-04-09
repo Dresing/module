@@ -60,6 +60,8 @@ static int spacefree(struct device *dev);
 #define MAJOR_NUMBER 254
 #define MIN_MINOR_NUMBER 0
 #define MAX_MINOR_NUMBER 1
+#define MAX_READERS 5
+#define MAX_WRITERS 1
 
 #define DEVICE_COUNT 2
 /* end of what really should have been in a .h file */
@@ -145,6 +147,10 @@ int dm510_init_module( void ) {
   zeroBuffer->rp = zeroBuffer->wp = zeroBuffer->start;
   firstBuffer->rp = firstBuffer->wp = firstBuffer->start;
 
+  //Init inumeration of reader/writers
+  zeroBuffer->nwriters = zeroBuffer->nreaders = 0;
+  firstBuffer->nwriters = firstBuffer->nreaders = 0;
+
   //Init queues
 	init_waitqueue_head(&(zeroBuffer->inq));
 	init_waitqueue_head(&(zeroBuffer->outq));
@@ -168,7 +174,7 @@ int dm510_init_module( void ) {
 
 
   //Debugging message
-	printk(KERN_INFO "DM510: Hellows from your devicos!\n");
+
 
   //Successful execution
 	return 0;
@@ -205,7 +211,7 @@ void dm510_cleanup_module( void ) {
 	devices = NULL;
 
   //Debug message
-	printk(KERN_INFO "DM510: Module unloaded.\n");
+
 
 
 }
@@ -238,15 +244,48 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
     dev->writeBuffer = zeroBuffer;
   }
 
-  //Increment number of readers/writers accordingly to mode and release the lock
-	if (filp->f_mode & FMODE_READ)
-		dev->readBuffer->nreaders++;
-	if (filp->f_mode & FMODE_WRITE)
-		dev->writeBuffer->nwriters++;
-	up(&dev->sem);
+  up(&dev->sem);
 
-  //Debug message
-  printk(KERN_INFO "DM510: File access granted.\n");
+
+  //Increment number of readers/writers accordingly to mode and release the lock
+	if (filp->f_mode & FMODE_READ){
+
+    down(&dev->readBuffer->sem);
+
+    if(dev->readBuffer->nreaders == MAX_READERS){
+      up(&dev->readBuffer->sem);
+      return -EBUSY;
+    }
+
+    dev->readBuffer->nreaders++;
+
+    up(&dev->readBuffer->sem);
+
+  }
+
+	if (filp->f_mode & FMODE_WRITE){
+
+    down(&dev->writeBuffer->sem);
+
+    if(dev->writeBuffer->nwriters == MAX_WRITERS){
+
+      up(&dev->writeBuffer->sem);
+
+      //If read access was already granted, revert it.
+      if(filp->f_mode & FMODE_READ){
+        down(&dev->readBuffer->sem);
+          dev->readBuffer->nreaders--;
+        up(&dev->readBuffer->sem);
+      }
+
+      return -EBUSY;
+    }
+
+    dev->writeBuffer->nwriters++;
+
+    up(&dev->writeBuffer->sem);
+
+  }
 
   //Disallow llseek
 	return nonseekable_open(inode, filp);
@@ -260,20 +299,20 @@ static int dm510_release( struct inode *inode, struct file *filp ) {
   //Get the device structure in the file-pointer's private data.
   struct device *dev = filp->private_data;
 
-	//Require the lock and decrement the counter of reader/write depeding on mode.
-	down(&dev->sem);
-	if (filp->f_mode & FMODE_READ){
+  if (filp->f_mode & FMODE_READ){
+    
+    down(&dev->readBuffer->sem);
     dev->readBuffer->nreaders--;
+    up(&dev->readBuffer->sem);
   }
-	if (filp->f_mode & FMODE_WRITE){
+
+  if (filp->f_mode & FMODE_WRITE){
+
+    down(&dev->writeBuffer->sem);
     dev->writeBuffer->nwriters--;
+    up(&dev->writeBuffer->sem);
+
   }
-
-  //Release the lock
-	up(&dev->sem);
-
-  //Debug message
-  printk(KERN_INFO "DM510: File released.\n");
 
   //Successful execution
 	return 0;
@@ -293,7 +332,7 @@ static ssize_t dm510_read( struct file *filp,
     return -ERESTARTSYS;
   }
 
-  if(dev->readBuffer->rp == dev->readBuffer->wp){
+  while(dev->readBuffer->rp == dev->readBuffer->wp){
     up(&dev->readBuffer->sem);
 
     wake_up_interruptible(&dev->readBuffer->inq);
@@ -302,7 +341,9 @@ static ssize_t dm510_read( struct file *filp,
       return -ERESTARTSYS;
     }
 
-    return 0;
+    if (down_interruptible(&dev->readBuffer->sem)){
+      return -ERESTARTSYS;
+    }
   }
 
   count = min(count, (size_t)(dev->readBuffer->wp - dev->readBuffer->rp));
@@ -333,13 +374,15 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
     return -ERESTARTSYS;
   }
 
-  if(dev->writeBuffer->wp == dev->writeBuffer->end){
+  while(dev->writeBuffer->wp == dev->writeBuffer->end){
     if(dev->writeBuffer->rp != dev->writeBuffer->end){
       up(&dev->writeBuffer->sem);
       if(wait_event_interruptible(dev->writeBuffer->inq, (dev->writeBuffer->rp == dev->writeBuffer->end))){
         return -ERESTARTSYS;
       }
-      return 0;
+      if (down_interruptible(&dev->writeBuffer->sem)){
+        return -ERESTARTSYS;
+      }
     }
     else{
       dev->writeBuffer->wp = dev->writeBuffer->start;
@@ -403,23 +446,13 @@ int dm510_init_device(struct device *device, int index){
 		printk(KERN_NOTICE "Error %d adding device %d", error, index);
 	}
 
-  printk(KERN_NOTICE "DevNo: %d", devno);
+
 
 
 	return 0;
 }
 
 
-static int spacefree(struct device *dev){
-
-  //Pointers allign, thus, the entire buffer, minus the current position, is free.
-  if (dev->writeBuffer->rp == dev->writeBuffer->wp){
-    return dev->writeBuffer->buffersize - 1;
-  }
-
-  //Calculate the space avaiable including wrap.
-	return ((dev->writeBuffer->rp + dev->writeBuffer->buffersize - dev->writeBuffer->wp) % dev->writeBuffer->buffersize) - 1;
-}
 
 module_init( dm510_init_module );
 module_exit( dm510_cleanup_module );
