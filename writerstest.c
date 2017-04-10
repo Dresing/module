@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <linux/ioctl.h>
+
+#define DM510_IOC_MAGIC  'q'
+#define DM510_SET_BUFFER _IOWR(DM510_IOC_MAGIC,   0, int)
 
 int main(int argc, char *argv[])
 {
@@ -26,11 +30,14 @@ int main(int argc, char *argv[])
     pid = fork();
 
     if (pid == 0) {
+
+
         fd = open("/dev/dm510-1", O_RDWR);
         perror("w/r open dm510-1");
 
         fd = open("/dev/dm510-1", O_RDONLY);
         perror("r open dm510-1");
+
 
         fd = open("/dev/dm510-1", O_RDONLY);
         perror("r open dm510-1");

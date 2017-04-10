@@ -54,7 +54,7 @@ static ssize_t dm510_write( struct file*, const char*, size_t, loff_t* );
 long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 int dm510_init_device(struct device*, int index);
 int dm510_init_buffer(struct buffer*);
-static int spacefree(struct device *dev);
+static int setBufferSize(struct buffer *buffer, int size);
 
 #define DEVICE_NAME "dm510_dev" /* Dev name as it appears in /proc/devices */
 #define MAJOR_NUMBER 254
@@ -64,6 +64,13 @@ static int spacefree(struct device *dev);
 #define MAX_WRITERS 1
 
 #define DEVICE_COUNT 2
+
+#define DM510_IOC_MAGIC  'q'
+#define DM510_SET_BUFFER _IOWR(DM510_IOC_MAGIC,   0, int)
+#define SCULL_P_IOCQSIZE _IOWR(DM510_IOC_MAGIC,   1, int)
+/* ... more to come */
+
+#define DN510_IOC_MAXNR 1
 /* end of what really should have been in a .h file */
 
 /* file operations struct */
@@ -300,7 +307,7 @@ static int dm510_release( struct inode *inode, struct file *filp ) {
   struct device *dev = filp->private_data;
 
   if (filp->f_mode & FMODE_READ){
-    
+
     down(&dev->readBuffer->sem);
     dev->readBuffer->nreaders--;
     up(&dev->readBuffer->sem);
@@ -407,15 +414,41 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
 }
 
 /* called by system call icotl */
-long dm510_ioctl(
-    struct file *filp,
-    unsigned int cmd,   /* command passed from the user */
-    unsigned long arg ) /* argument of the command */
-{
-	/* ioctl code belongs here */
+long dm510_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg ){
+
+  if (_IOC_TYPE(cmd) != DM510_IOC_MAGIC) return -ENOTTY;
+  if (_IOC_NR(cmd) > DN510_IOC_MAXNR) return -ENOTTY;
+
+  int err;
+
+  if (_IOC_DIR(cmd) & _IOC_READ)
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+	else if (_IOC_DIR(cmd) & _IOC_WRITE)
+		err =  !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+	if (err) return -EFAULT;
+
+
+  struct device *dev = filp->private_data;
+
+
+  switch(cmd) {
+    case DM510_SET_BUFFER:
+      return 0;
+		break;
+
+	  case SCULL_P_IOCQSIZE:
+		  return 0;
+    break;
+
+
+	  default:  /* redundant, as cmd was checked against MAXNR */
+		return -ENOTTY;
+	}
+
 	printk(KERN_INFO "DM510: ioctl called.\n");
 
-	return 0; //has to be changed
+  //Executed successfully.
+	return 0;
 }
 
 static int isError(status){
@@ -452,7 +485,32 @@ int dm510_init_device(struct device *device, int index){
 	return 0;
 }
 
+static int setBufferSize(struct buffer *buffer, int size){
 
+
+  struct buffer *holder = kmalloc(size, GFP_KERNEL);
+
+  if (!holder) {
+    return -ENOMEM;
+  }
+
+  //Copy content from old buffer into the new one.
+  down(&buffer->sem);
+
+  //New buffer must be bigger.
+  if(size <= buffer->end - buffer->start){
+    kfree(holder);
+    up(&buffer->sem);
+    return -EINVAL;
+  }
+
+  buffer->start = (struct buffer*) memcpy(holder, buffer->start, (size_t) (buffer->end - buffer->start));
+
+
+  up(&buffer->sem);
+
+  return 0;
+}
 
 module_init( dm510_init_module );
 module_exit( dm510_cleanup_module );
