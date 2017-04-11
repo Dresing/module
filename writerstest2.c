@@ -8,24 +8,30 @@
  * This is done in both directions.
  */
 
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <linux/ioctl.h>
+ #include <stdio.h>
+ #include <unistd.h>
+ #include <sys/types.h>
+ #include <stdlib.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <linux/ioctl.h>
+ #include <signal.h>
 
-
-
+#define DM510_IOC_MAGIC  'q'
+#define DM510_SET_WRITE_BUFFER _IOWR(DM510_IOC_MAGIC,   0, int)
+#define DM510_SET_READ_BUFFER _IOWR(DM510_IOC_MAGIC,   1, int)
+#define DM510_SET_MAX_READERS _IOWR(DM510_IOC_MAGIC,   2, int)
+#define DN510_IOC_MAXNR 2
 
 
 int open_readers(){
   pid_t pid;
-  int fd;
+  int fd, fd2;
   int sum = 0, i;
   int val;
   int cnt;
+
+  int score = 0;
 
   pid = fork();
 
@@ -45,17 +51,27 @@ int open_readers(){
 
       close(fd);
 
-
-
-
-
-
-  } else {
       fd = open("/dev/dm510-1", O_RDONLY);
       perror("r open dm510-1");
 
       close(fd);
 
+      fd = open("/dev/dm510-1", O_RDONLY);
+      perror("r open dm510-1");
+
+      close(fd);
+
+      fd = open("/dev/dm510-1", O_RDONLY);
+      perror("r open dm510-1");
+
+      close(fd);
+
+  } else {
+      fd = open("/dev/dm510-1", O_RDONLY);
+      perror("r open dm510-1");
+
+      ioctl(fd, DM510_SET_MAX_READERS, 20);
+      close(fd);
       fd = open("/dev/dm510-1", O_RDONLY);
       perror("r open dm510-1");
 
@@ -69,6 +85,9 @@ int open_readers(){
       fd = open("/dev/dm510-1", O_RDWR);
       perror("w/r open dm510-1");
 
+      fd2 = open("/dev/dm510-1", O_RDWR);
+      perror("w/r open dm510-1");
+
       close(fd);
 
       fd = open("/dev/dm510-1", O_RDONLY);
@@ -77,16 +96,18 @@ int open_readers(){
       close(fd);
 
       wait(NULL);
+
   }
 
-  return 0;
+  return score;
 }
 int main(int argc, char *argv[])
 {
   printf("\n ");
-  printf("-- Opening files (Max 5, blocking) -- \n ");
+  printf("-- Opening files (Max 20, blocking -> faster)  -- \n ");
     sleep(1);
     open_readers();
     sleep(1);
+
 
 }

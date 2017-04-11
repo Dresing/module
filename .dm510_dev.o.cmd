@@ -3,6 +3,7 @@ cmd_/tmp/dm510/module/dm510_dev.o := gcc -Wp,-MD,/tmp/dm510/module/.dm510_dev.o.
 source_/tmp/dm510/module/dm510_dev.o := /tmp/dm510/module/dm510_dev.c
 
 deps_/tmp/dm510/module/dm510_dev.o := \
+  /tmp/dm510/module/dm510_dev.h \
   include/linux/module.h \
     $(wildcard include/config/sysfs.h) \
     $(wildcard include/config/modules.h) \

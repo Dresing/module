@@ -1,93 +1,6 @@
-/* Prototype module for third mandatory DM510 assignment */
-#ifndef __KERNEL__
-#  define __KERNEL__
-#endif
-#ifndef MODULE
-#  define MODULE
-#endif
-
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/slab.h>
-#include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/cdev.h>
-#include <linux/errno.h>
-#include <linux/types.h>
-#include <linux/wait.h>
-#include <asm/uaccess.h>
-#include <linux/semaphore.h>
-#include <linux/sched.h>
-/* #include <asm/system.h> */
-#include <asm/switch_to.h>
-#ifndef DEFAULT_BUFFER
-  #define DEFAULT_BUFFER 400
-#endif
-#define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1);
-
-struct buffer {
-    wait_queue_head_t inq, outq;       /* read and write queues */
-    char *start, *end;                /* begin of buf, end of buf */
-    int buffersize;                    /* used in pointer arithmetic */
-    char *rp, *wp;                     /* where to read, where to write */
-    int nreaders, nwriters;
-    struct semaphore sem;
-};
-
-struct device {
-    int index;
-    struct buffer *readBuffer;
-    struct buffer *writeBuffer;
-    struct fasync_struct *async_queue; /* asynchronous readers */
-    struct semaphore sem;              /* mutual exclusion semaphore */
-    struct cdev cdev;                  /* Char device structure */
-};
-
-static struct device *devices;
-
-/* Prototypes - this would normally go in a .h file */
-static int dm510_open( struct inode*, struct file* );
-static int isError(int);
-static int dm510_release( struct inode*, struct file* );
-static ssize_t dm510_read( struct file*, char*, size_t, loff_t* );
-static ssize_t dm510_write( struct file*, const char*, size_t, loff_t* );
-long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
-int dm510_init_device(struct device*, int index);
-int dm510_init_buffer(struct buffer*);
-static int setBufferSize(struct buffer *buffer, int size);
-
-#define DEVICE_NAME "dm510_dev" /* Dev name as it appears in /proc/devices */
-#define MAJOR_NUMBER 254
-#define MIN_MINOR_NUMBER 0
-#define MAX_MINOR_NUMBER 1
-#define MAX_READERS 5
-#define MAX_WRITERS 1
-
-#define DEVICE_COUNT 2
-
-#define DM510_IOC_MAGIC  'q'
-#define DM510_SET_BUFFER _IOWR(DM510_IOC_MAGIC,   0, int)
-#define SCULL_P_IOCQSIZE _IOWR(DM510_IOC_MAGIC,   1, int)
-/* ... more to come */
-
-#define DN510_IOC_MAXNR 1
-/* end of what really should have been in a .h file */
-
-/* file operations struct */
-static struct file_operations dm510_fops = {
-	.owner   = THIS_MODULE,
-	.read    = dm510_read,
-	.write   = dm510_write,
-	.open    = dm510_open,
-	.release = dm510_release,
-  .unlocked_ioctl   = dm510_ioctl
-};
-
-static struct buffer *zeroBuffer;
-static struct buffer *firstBuffer;
 
 
-dev_t deviceNums = MKDEV(MAJOR_NUMBER, MIN_MINOR_NUMBER);
+#include "dm510_dev.h"
 
 
 /* called when module is loaded */
@@ -97,7 +10,7 @@ int dm510_init_module( void ) {
 	int status = register_chrdev_region(deviceNums, DEVICE_COUNT , "tester");
 
   //Negative values indicate an error. No releasing is necesarry.
-	if (isError(status)) {
+	if (status < 0) {
 		printk(KERN_NOTICE "Unable to get region, error %d\n", status);
 		return -1;
 	}
@@ -115,58 +28,8 @@ int dm510_init_module( void ) {
   zeroBuffer = kmalloc(sizeof(struct buffer), GFP_KERNEL);
   firstBuffer = kmalloc(sizeof(struct buffer), GFP_KERNEL);
 
-  //The buffers were not allocated, release lock and give a no memory error.
-  if (!zeroBuffer) {
-    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
-    printk(KERN_INFO "DM510: Register error. \n");
-    return -ENOMEM;
-  }
-  if (!firstBuffer) {
-    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
-    printk(KERN_INFO "DM510: Register error. \n");
-    return -ENOMEM;
-  }
-
-  zeroBuffer->start = kmalloc(DEFAULT_BUFFER, GFP_KERNEL);
-  if (!zeroBuffer->start) {
-    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
-    printk(KERN_INFO "DM510: Register error. \n");
-    return -ENOMEM;
-  }
-
-  firstBuffer->start = kmalloc(DEFAULT_BUFFER, GFP_KERNEL);
-  if (!firstBuffer->start) {
-    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
-    printk(KERN_INFO "DM510: Register error. \n");
-    return -ENOMEM;
-  }
-
-
-  //Set buffersize in buffer struct.
-  zeroBuffer->buffersize = DEFAULT_BUFFER;
-  firstBuffer->buffersize = DEFAULT_BUFFER;
-
-  //End of the buffer is the start address plus the size.
-  zeroBuffer->end = zeroBuffer->start + zeroBuffer->buffersize;
-  firstBuffer->end = firstBuffer->start + firstBuffer->buffersize;
-
-  //Read and write pointers should start at the beginning of file (device)
-  zeroBuffer->rp = zeroBuffer->wp = zeroBuffer->start;
-  firstBuffer->rp = firstBuffer->wp = firstBuffer->start;
-
-  //Init inumeration of reader/writers
-  zeroBuffer->nwriters = zeroBuffer->nreaders = 0;
-  firstBuffer->nwriters = firstBuffer->nreaders = 0;
-
-  //Init queues
-	init_waitqueue_head(&(zeroBuffer->inq));
-	init_waitqueue_head(&(zeroBuffer->outq));
-  init_waitqueue_head(&(firstBuffer->inq));
-	init_waitqueue_head(&(firstBuffer->outq));
-
-  init_MUTEX(&zeroBuffer->sem);
-  init_MUTEX(&firstBuffer->sem);
-
+  dm510_init_buffer(zeroBuffer);
+  dm510_init_buffer(firstBuffer);
 
   //Iterating variable necesary as of c90 standard
 	int i;
@@ -185,6 +48,52 @@ int dm510_init_module( void ) {
 
   //Successful execution
 	return 0;
+}
+
+int dm510_init_buffer(struct buffer* buff){
+
+  //The buffers were not allocated, release lock and give a no memory error.
+  if (!buff) {
+    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
+    printk(KERN_INFO "DM510: Register error. \n");
+    return -ENOMEM;
+  }
+
+  buff->start = kmalloc(DEFAULT_BUFFER, GFP_KERNEL);
+  if (!zeroBuffer->start) {
+    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
+    printk(KERN_INFO "DM510: Register error. \n");
+    return -ENOMEM;
+  }
+
+
+
+  //Set buffersize in buffer struct.
+  buff->buffersize = DEFAULT_BUFFER;
+
+
+  //End of the buffer is the start address plus the size.
+  buff->end = buff->start + buff->buffersize;
+
+
+  //Read and write pointers should start at the beginning of file (device)
+  buff->rp = buff->wp = buff->start;
+
+
+  //Init inumeration of reader/writers
+  buff->nwriters = buff->nreaders = 0;
+
+
+  //Init queues
+  init_waitqueue_head(&(buff->inq));
+  init_waitqueue_head(&(buff->outq));
+  init_waitqueue_head(&(buff->readq));
+
+
+  init_MUTEX(&buff->sem);
+
+  return 0;
+
 }
 
 /* Called when module is unloaded */
@@ -257,11 +166,17 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
   //Increment number of readers/writers accordingly to mode and release the lock
 	if (filp->f_mode & FMODE_READ){
 
-    down(&dev->readBuffer->sem);
+    down_interruptible(&dev->readBuffer->sem);
 
-    if(dev->readBuffer->nreaders == MAX_READERS){
+    while(dev->readBuffer->nreaders == MAX_READERS){
       up(&dev->readBuffer->sem);
-      return -EBUSY;
+
+      if(wait_event_interruptible(dev->readBuffer->readq, (dev->readBuffer->nreaders != MAX_READERS))){
+        return -ERESTARTSYS;
+      }
+
+      down_interruptible(&dev->readBuffer->sem);
+
     }
 
     dev->readBuffer->nreaders++;
@@ -283,6 +198,7 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
         down(&dev->readBuffer->sem);
           dev->readBuffer->nreaders--;
         up(&dev->readBuffer->sem);
+        wake_up_interruptible(&dev->readBuffer->readq);
       }
 
       return -EBUSY;
@@ -311,6 +227,7 @@ static int dm510_release( struct inode *inode, struct file *filp ) {
     down(&dev->readBuffer->sem);
     dev->readBuffer->nreaders--;
     up(&dev->readBuffer->sem);
+    wake_up_interruptible(&dev->readBuffer->readq);
   }
 
   if (filp->f_mode & FMODE_WRITE){
@@ -343,6 +260,10 @@ static ssize_t dm510_read( struct file *filp,
     up(&dev->readBuffer->sem);
 
     wake_up_interruptible(&dev->readBuffer->inq);
+
+    if (filp->f_flags & O_NONBLOCK){
+      return -EAGAIN;
+    }
 
     if(wait_event_interruptible(dev->readBuffer->outq, (dev->readBuffer->rp != dev->readBuffer->wp))){
       return -ERESTARTSYS;
@@ -384,6 +305,11 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
   while(dev->writeBuffer->wp == dev->writeBuffer->end){
     if(dev->writeBuffer->rp != dev->writeBuffer->end){
       up(&dev->writeBuffer->sem);
+
+      if (filp->f_flags & O_NONBLOCK){
+        return -EAGAIN;
+      }
+
       if(wait_event_interruptible(dev->writeBuffer->inq, (dev->writeBuffer->rp == dev->writeBuffer->end))){
         return -ERESTARTSYS;
       }
@@ -392,7 +318,6 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
       }
     }
     else{
-      printk(KERN_INFO "Wrapping.\n");
       dev->writeBuffer->wp = dev->writeBuffer->start;
       dev->writeBuffer->rp = dev->writeBuffer->start;
     }
@@ -433,28 +358,29 @@ long dm510_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg ){
 
 
   switch(cmd) {
-    case DM510_SET_BUFFER:
-        setBufferSize(dev->writeBuffer, arg);
+    case DM510_SET_WRITE_BUFFER:
+        return setBufferSize(dev->writeBuffer, arg);
 		  break;
 
-	  case SCULL_P_IOCQSIZE:
-		  return 0;
+	  case DM510_SET_READ_BUFFER:
+		    return setBufferSize(dev->readBuffer, arg);
     break;
+
+    case DM510_SET_MAX_READERS:
+      return setMaxReaders(dev->readBuffer, arg);
+      break;
 
 
 	  default:  /* redundant, as cmd was checked against MAXNR */
 		return -ENOTTY;
 	}
 
-	printk(KERN_INFO "DM510: ioctl called.\n");
 
   //Executed successfully.
 	return 0;
 }
 
-static int isError(status){
-		return (status < 0);
-}
+
 
 int dm510_init_device(struct device *device, int index){
 
@@ -490,7 +416,7 @@ static int setBufferSize(struct buffer *buffer, int size){
 
 
 
-  struct buffer *holder = kmalloc(size, GFP_KERNEL);
+  char* holder = kmalloc(size, GFP_KERNEL);
 
   if (!holder) {
     return -ENOMEM;
@@ -512,7 +438,7 @@ static int setBufferSize(struct buffer *buffer, int size){
 
   buffer->buffersize = size;
 
-  struct buffer* newBufferPointer = (struct buffer*) memcpy(holder, buffer->start, (size_t) (buffer->buffersize));
+  char* newBufferPointer = (struct buffer*) memcpy(holder, buffer->start, (size_t) (buffer->buffersize));
 
   buffer->rp = (buffer->rp - buffer->start) + newBufferPointer;
 
@@ -526,6 +452,24 @@ static int setBufferSize(struct buffer *buffer, int size){
   up(&buffer->sem);
 
 
+
+  return 0;
+}
+
+static int setMaxReaders(struct buffer *buffer, int num){
+
+
+  down(&buffer->sem);
+
+  if(buffer->nreaders > num){
+    up(&buffer->sem);
+    return -EINVAL;
+  }
+
+  MAX_READERS = num;
+
+
+  up(&buffer->sem);
 
   return 0;
 }
