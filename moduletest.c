@@ -14,8 +14,12 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <linux/ioctl.h>
 
-#define ITS 10000
+#define DM510_IOC_MAGIC  'q'
+#define DM510_SET_BUFFER _IOWR(DM510_IOC_MAGIC,   0, int)
+
+#define ITS 20000
 
 void read_all(int fd, void *buf, int count) {
     while (count > 0) {
@@ -58,6 +62,7 @@ int main(int argc, char *argv[])
     if (pid == 0) {
         fd = open("/dev/dm510-0", O_RDWR);
 	perror("w open");
+        ioctl(fd, DM510_SET_BUFFER, 5000);
         for (i=0; i<ITS; i++) {
             val++;
             sum += val;
@@ -74,6 +79,7 @@ int main(int argc, char *argv[])
         }
         printf("2. result: %d\n", sum);
     } else {
+
         fd = open("/dev/dm510-1", O_RDWR);
         perror("r open");
 

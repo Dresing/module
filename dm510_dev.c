@@ -21,7 +21,7 @@
 /* #include <asm/system.h> */
 #include <asm/switch_to.h>
 #ifndef DEFAULT_BUFFER
-  #define DEFAULT_BUFFER 1
+  #define DEFAULT_BUFFER 400
 #endif
 #define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1);
 
@@ -392,6 +392,7 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
       }
     }
     else{
+      printk(KERN_INFO "Wrapping.\n");
       dev->writeBuffer->wp = dev->writeBuffer->start;
       dev->writeBuffer->rp = dev->writeBuffer->start;
     }
@@ -433,8 +434,8 @@ long dm510_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg ){
 
   switch(cmd) {
     case DM510_SET_BUFFER:
-      return 0;
-		break;
+        setBufferSize(dev->writeBuffer, arg);
+		  break;
 
 	  case SCULL_P_IOCQSIZE:
 		  return 0;
@@ -488,6 +489,7 @@ int dm510_init_device(struct device *device, int index){
 static int setBufferSize(struct buffer *buffer, int size){
 
 
+
   struct buffer *holder = kmalloc(size, GFP_KERNEL);
 
   if (!holder) {
@@ -498,16 +500,32 @@ static int setBufferSize(struct buffer *buffer, int size){
   down(&buffer->sem);
 
   //New buffer must be bigger.
-  if(size <= buffer->end - buffer->start){
+  if(size <= buffer->buffersize){
     kfree(holder);
     up(&buffer->sem);
     return -EINVAL;
   }
 
-  buffer->start = (struct buffer*) memcpy(holder, buffer->start, (size_t) (buffer->end - buffer->start));
+
+
+  //Update pointers in the buffer
+
+  buffer->buffersize = size;
+
+  struct buffer* newBufferPointer = (struct buffer*) memcpy(holder, buffer->start, (size_t) (buffer->buffersize));
+
+  buffer->rp = (buffer->rp - buffer->start) + newBufferPointer;
+
+  buffer->wp = (buffer->wp - buffer->start) + newBufferPointer;
+
+  buffer->start = newBufferPointer;
+
+  buffer->end = buffer->start + size;
 
 
   up(&buffer->sem);
+
+
 
   return 0;
 }
