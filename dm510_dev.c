@@ -6,6 +6,9 @@
 /* called when module is loaded */
 int dm510_init_module( void ) {
 
+  //Iterating variable necesary as of c90 standard
+	int i;
+
   //Resgister a region for the driver and devices.
 	int status = register_chrdev_region(deviceNums, DEVICE_COUNT , "tester");
 
@@ -31,8 +34,6 @@ int dm510_init_module( void ) {
   dm510_init_buffer(zeroBuffer);
   dm510_init_buffer(firstBuffer);
 
-  //Iterating variable necesary as of c90 standard
-	int i;
 
 	//Ensure everything is emptied at the memory location to avoid junk errors.
 	memset(devices, 0, DEVICE_COUNT * sizeof(struct device));
@@ -50,62 +51,20 @@ int dm510_init_module( void ) {
 	return 0;
 }
 
-int dm510_init_buffer(struct buffer* buff){
 
-  //The buffers were not allocated, release lock and give a no memory error.
-  if (!buff) {
-    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
-    printk(KERN_INFO "DM510: Register error. \n");
-    return -ENOMEM;
-  }
-
-  buff->start = kmalloc(DEFAULT_BUFFER, GFP_KERNEL);
-  if (!zeroBuffer->start) {
-    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
-    printk(KERN_INFO "DM510: Register error. \n");
-    return -ENOMEM;
-  }
-
-
-
-  //Set buffersize in buffer struct.
-  buff->buffersize = DEFAULT_BUFFER;
-
-
-  //End of the buffer is the start address plus the size.
-  buff->end = buff->start + buff->buffersize;
-
-
-  //Read and write pointers should start at the beginning of file (device)
-  buff->rp = buff->wp = buff->start;
-
-
-  //Init inumeration of reader/writers
-  buff->nwriters = buff->nreaders = 0;
-
-
-  //Init queues
-  init_waitqueue_head(&(buff->inq));
-  init_waitqueue_head(&(buff->outq));
-  init_waitqueue_head(&(buff->readq));
-
-
-  init_MUTEX(&buff->sem);
-
-  return 0;
-
-}
 
 /* Called when module is unloaded */
 void dm510_cleanup_module( void ) {
+
+  //Iterating variable necesary as of c90 standard
+  int i;
 
   //Memory location of devices is empty, no work required.
 	if (!devices){
       return;
   }
 
-  //Iterating variable necesary as of c90 standard
-	int i;
+
 
   //Starting cleaning up allocations.
 	for(i = 0; i < DEVICE_COUNT; i++){
@@ -166,7 +125,9 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
   //Increment number of readers/writers accordingly to mode and release the lock
 	if (filp->f_mode & FMODE_READ){
 
-    down_interruptible(&dev->readBuffer->sem);
+    if(down_interruptible(&dev->readBuffer->sem)){ 
+      return -ERESTARTSYS;
+    }
 
     while(dev->readBuffer->nreaders == MAX_READERS){
       up(&dev->readBuffer->sem);
@@ -175,7 +136,9 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
         return -ERESTARTSYS;
       }
 
-      down_interruptible(&dev->readBuffer->sem);
+      if(down_interruptible(&dev->readBuffer->sem)){
+        return -ERESTARTSYS;
+      }
 
     }
 
@@ -342,19 +305,18 @@ static ssize_t dm510_write( struct file *filp, const char *buf, size_t count, lo
 /* called by system call icotl */
 long dm510_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg ){
 
+  int err;
+
+  struct device *dev = filp->private_data;
+
   if (_IOC_TYPE(cmd) != DM510_IOC_MAGIC) return -ENOTTY;
   if (_IOC_NR(cmd) > DN510_IOC_MAXNR) return -ENOTTY;
-
-  int err;
 
   if (_IOC_DIR(cmd) & _IOC_READ)
 		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
 		err =  !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 	if (err) return -EFAULT;
-
-
-  struct device *dev = filp->private_data;
 
 
   switch(cmd) {
@@ -385,11 +347,11 @@ long dm510_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg ){
 int dm510_init_device(struct device *device, int index){
 
 
+  //Retreive minor number (device number) and set error as positive value.
+  int error, devno = deviceNums + index;
+
 	//Init lock
 	init_MUTEX(&device->sem);
-
-	//Retreive minor number (device number) and set error as positive value.
-	int error, devno = deviceNums + index;
 
 	//Init cdev and set owner, device and index number (0-DEVICE_COUNT).
 	cdev_init(&device->cdev, &dm510_fops);
@@ -418,6 +380,8 @@ static int setBufferSize(struct buffer *buffer, int size){
 
   char* holder = kmalloc(size, GFP_KERNEL);
 
+
+
   if (!holder) {
     return -ENOMEM;
   }
@@ -438,13 +402,13 @@ static int setBufferSize(struct buffer *buffer, int size){
 
   buffer->buffersize = size;
 
-  char* newBufferPointer = (struct buffer*) memcpy(holder, buffer->start, (size_t) (buffer->buffersize));
+  holder = memcpy(holder, buffer->start, (size_t) size);
 
-  buffer->rp = (buffer->rp - buffer->start) + newBufferPointer;
+  buffer->rp = (buffer->rp - buffer->start) + holder;
 
-  buffer->wp = (buffer->wp - buffer->start) + newBufferPointer;
+  buffer->wp = (buffer->wp - buffer->start) + holder;
 
-  buffer->start = newBufferPointer;
+  buffer->start = holder;
 
   buffer->end = buffer->start + size;
 
@@ -472,6 +436,52 @@ static int setMaxReaders(struct buffer *buffer, int num){
   up(&buffer->sem);
 
   return 0;
+}
+
+int dm510_init_buffer(struct buffer* buff){
+
+  //The buffers were not allocated, release lock and give a no memory error.
+  if (!buff) {
+    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
+    printk(KERN_INFO "DM510: Register error. \n");
+    return -ENOMEM;
+  }
+
+  buff->start = kmalloc(DEFAULT_BUFFER, GFP_KERNEL);
+  if (!zeroBuffer->start) {
+    unregister_chrdev_region(deviceNums, DEVICE_COUNT);
+    printk(KERN_INFO "DM510: Register error. \n");
+    return -ENOMEM;
+  }
+
+
+
+  //Set buffersize in buffer struct.
+  buff->buffersize = DEFAULT_BUFFER;
+
+
+  //End of the buffer is the start address plus the size.
+  buff->end = buff->start + buff->buffersize;
+
+
+  //Read and write pointers should start at the beginning of file (device)
+  buff->rp = buff->wp = buff->start;
+
+
+  //Init inumeration of reader/writers
+  buff->nwriters = buff->nreaders = 0;
+
+
+  //Init queues
+  init_waitqueue_head(&(buff->inq));
+  init_waitqueue_head(&(buff->outq));
+  init_waitqueue_head(&(buff->readq));
+
+
+  init_MUTEX(&buff->sem);
+
+  return 0;
+
 }
 
 module_init( dm510_init_module );
