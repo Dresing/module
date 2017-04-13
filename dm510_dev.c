@@ -408,12 +408,16 @@ static int setBufferSize(struct buffer *buffer, int size){
 
   buffer->wp = (buffer->wp - buffer->start) + holder;
 
+  kfree(buffer->start);
+
   buffer->start = holder;
 
   buffer->end = buffer->start + size;
 
 
   up(&buffer->sem);
+
+
 
 
 
